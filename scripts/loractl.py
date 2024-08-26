@@ -79,6 +79,7 @@ class DynamicLoRAForForge(scripts.Script):
         self.original_apply_lora = None
         self.current_step = 0
         self.total_steps = 0
+        self.wrapped_apply_lora_called = False
         logger.info("DynamicLoRAForForge instance created")
 
     def title(self):
@@ -104,6 +105,7 @@ class DynamicLoRAForForge(scripts.Script):
         self.weight_history.clear()
         self.current_step = 0
         self.total_steps = p.steps
+        self.wrapped_apply_lora_called = False
 
         # Log the parsed LoRA instructions
         for prompt in [p.prompt, p.negative_prompt]:
@@ -113,10 +115,12 @@ class DynamicLoRAForForge(scripts.Script):
                 logger.info(f"Parsed LoRA: {base_name}, Instructions: {instructions}")
 
         unet = p.sd_model.forge_objects.unet
+        logger.info(f"Original UNet apply_lora method: {unet.apply_lora}")
         self.original_apply_lora = unet.apply_lora
 
         def wrapped_apply_lora(lora_name: str, strength: float):
-            logger.info(f"Applying LoRA: {lora_name} with base strength {strength}")
+            logger.info(f"wrapped_apply_lora called with lora_name={lora_name}, strength={strength}")
+            self.wrapped_apply_lora_called = True
             dynamic_strength = dynamic_lora_application(unet, lora_name, strength, self.current_step, self.total_steps)
             
             base_name, _ = parse_lora_name(lora_name)
@@ -128,6 +132,7 @@ class DynamicLoRAForForge(scripts.Script):
             return self.original_apply_lora(lora_name, dynamic_strength)
 
         unet.apply_lora = wrapped_apply_lora
+        logger.info(f"Wrapped UNet apply_lora method: {unet.apply_lora}")
 
         # Monkey patch the UNet forward method to track steps
         original_forward = unet.forward
@@ -138,6 +143,18 @@ class DynamicLoRAForForge(scripts.Script):
             return original_forward(*args, **kwargs)
 
         unet.forward = forward_with_step_tracking
+        logger.info(f"Wrapped UNet forward method: {unet.forward}")
+
+        # Fallback step tracking
+        original_sampler_callback = p.callback
+
+        def sampler_callback(step, *args, **kwargs):
+            self.current_step = step
+            logger.info(f"Sampler callback. Current step: {self.current_step}")
+            if original_sampler_callback:
+                original_sampler_callback(step, *args, **kwargs)
+
+        p.callback = sampler_callback
 
         p.sd_model.forge_objects.unet = unet
 
@@ -148,6 +165,10 @@ class DynamicLoRAForForge(scripts.Script):
 
     def postprocess(self, p, processed, enabled, plot_weights):
         logger.info(f"postprocess called with enabled={enabled}, plot_weights={plot_weights}")
+        logger.info(f"wrapped_apply_lora was called: {self.wrapped_apply_lora_called}")
+        logger.info(f"Final current_step: {self.current_step}")
+        logger.info(f"Final weight history: {self.weight_history}")
+
         if enabled and plot_weights:
             plot = self.make_plot()
             if plot is not None:
@@ -164,7 +185,6 @@ class DynamicLoRAForForge(scripts.Script):
             del p.sd_model.forge_objects.unet.forward
             logger.info("Removed step tracking from UNet forward method")
 
-        logger.info(f"Final weight history: {self.weight_history}")
         self.weight_history.clear()
 
     def make_plot(self):
