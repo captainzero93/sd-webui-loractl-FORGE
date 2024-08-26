@@ -16,27 +16,27 @@ logger.info("Dynamic LoRA Weights script is being loaded")
 def calculate_dynamic_strength(instructions: Dict[int, float], base_strength: float, current_step: int, max_steps: int) -> float:
     if not instructions:
         return base_strength
-    
+
     normalized_step = current_step / max_steps * 100  # Convert to percentage
     steps = sorted(instructions.keys())
-    
+
     if normalized_step <= steps[0]:
         return instructions[steps[0]] * base_strength
     if normalized_step >= steps[-1]:
         return instructions[steps[-1]] * base_strength
-    
+
     # Find the two nearest instruction points
     for i, step in enumerate(steps):
         if step > normalized_step:
             prev_step, next_step = steps[i-1], step
             prev_weight, next_weight = instructions[prev_step], instructions[step]
             break
-    
+
     # Linear interpolation
     weight_range = next_weight - prev_weight
     step_progress = (normalized_step - prev_step) / (next_step - prev_step)
     interpolated_weight = prev_weight + (weight_range * step_progress)
-    
+
     logger.debug(f"Calculated dynamic strength: {interpolated_weight * base_strength} for step {current_step}/{max_steps}")
     return interpolated_weight * base_strength
 
@@ -54,6 +54,7 @@ class DynamicLoRAForForge(scripts.Script):
         self.dynamic_loras: Dict[str, Dict[int, float]] = {}
         self.current_step = 0
         self.total_steps = 0
+        self.original_activate = None
         logger.info("DynamicLoRAForForge instance created")
 
     def title(self):
@@ -94,13 +95,15 @@ class DynamicLoRAForForge(scripts.Script):
                     # Replace dynamic instructions with a placeholder
                     new_lora = f"{base_name}:1.0"
                     prompt = prompt.replace(f"<lora:{lora}>", f"<lora:{new_lora}>")
-            
+
         p.prompt = prompt
         p.negative_prompt = prompt
 
+        # Store the original activate method
+        self.original_activate = extra_networks.extra_networks_dict['lora'].activate
+
         # Monkey patch extra_networks_lora.activate
-        original_activate = extra_networks.extra_networks_dict['lora'].activate
-        def wrapped_activate(self, p, params):
+        def wrapped_activate(self_lora, p, params):
             lora_name = params.positional[0]
             if lora_name in self.dynamic_loras:
                 # Apply dynamic strength
@@ -111,12 +114,12 @@ class DynamicLoRAForForge(scripts.Script):
                     self.total_steps
                 )
                 params.positional[1] = str(dynamic_strength)
-                
+
                 if lora_name not in self.weight_history:
                     self.weight_history[lora_name] = []
                 self.weight_history[lora_name].append((self.current_step, dynamic_strength))
-            
-            return original_activate(p, params)
+
+            return self.original_activate(p, params)
 
         extra_networks.extra_networks_dict['lora'].activate = wrapped_activate
 
@@ -142,8 +145,11 @@ class DynamicLoRAForForge(scripts.Script):
                 logger.warning("Plot was None, not appending to processed images")
 
         # Restore original methods
-        extra_networks.extra_networks_dict['lora'].activate = original_activate
-        logger.info("Restored original lora activate method")
+        if self.original_activate is not None:
+            extra_networks.extra_networks_dict['lora'].activate = self.original_activate
+            logger.info("Restored original lora activate method")
+        else:
+            logger.warning("Original activate method was not stored, unable to restore")
 
         self.weight_history.clear()
         self.dynamic_loras.clear()
@@ -159,13 +165,13 @@ class DynamicLoRAForForge(scripts.Script):
             steps, weights = zip(*history)
             plt.plot(steps, weights, label=lora_name)
             logger.info(f"Plotting {lora_name}: steps={steps}, weights={weights}")
-        
+
         plt.xlabel('Step')
         plt.ylabel('LoRA Weight')
         plt.title('Dynamic LoRA Weights')
         plt.legend()
         plt.grid(True)
-        
+
         # Convert plot to image
         fig = plt.gcf()
         fig.canvas.draw()
