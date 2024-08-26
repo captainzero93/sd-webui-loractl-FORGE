@@ -1,3 +1,5 @@
+edit: work in progress, this is CLOSE but still not working correctly in FORGE. Possibly due to me testing it on FLUX.
+
 # LoRa Control - Dynamic Weights Controller for FORGE
 
 This is an extension for the [FORGE Stable Diffusion web interface](https://github.com/lllyasviel/stable-diffusion-webui-forge) which implements dynamic LoRA weight control during image generation. It allows for specifying keyframe weights for LoRAs at arbitrary points during the generation process.
