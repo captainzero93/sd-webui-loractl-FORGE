@@ -40,23 +40,29 @@ def calculate_dynamic_strength(instructions: Dict[int, float], base_strength: fl
     logger.debug(f"Calculated dynamic strength: {interpolated_weight * base_strength} for step {current_step}/{max_steps}")
     return interpolated_weight * base_strength
 
-def parse_lora_name(lora_name: str) -> Tuple[str, Dict[int, float]]:
-    if '[' not in lora_name:
-        return lora_name, {}
-    
-    base_name, instructions = lora_name.split('[')
-    instructions = instructions.rstrip(']')
-    parsed_instructions = {}
-    for instruction in instructions.split(','):
-        step, weight = instruction.split(':')
-        parsed_instructions[int(step)] = float(weight)
-    
-    logger.debug(f"Parsed LoRA name: {base_name}, Instructions: {parsed_instructions}")
-    return base_name.strip(), parsed_instructions
+def parse_lora_name(lora_name: str) -> Tuple[str, Dict[int, float], float]:
+    parts = lora_name.split(':')
+    base_name = parts[0]
+    instructions = {}
+    base_strength = 1.0
+
+    if len(parts) > 1:
+        if '[' in parts[1]:
+            instruction_part = parts[1].strip('[]')
+            for instruction in instruction_part.split(','):
+                step, weight = instruction.split(':')
+                instructions[int(step)] = float(weight)
+            if len(parts) > 2:
+                base_strength = float(parts[2])
+        else:
+            base_strength = float(parts[1])
+
+    logger.debug(f"Parsed LoRA name: {base_name}, Instructions: {instructions}, Base strength: {base_strength}")
+    return base_name.strip(), instructions, base_strength
 
 def dynamic_lora_application(unet, lora_name: str, strength: float, step: int, max_steps: int):
-    base_name, instructions = parse_lora_name(lora_name)
-    dynamic_strength = calculate_dynamic_strength(instructions, strength, step, max_steps)
+    base_name, instructions, base_strength = parse_lora_name(lora_name)
+    dynamic_strength = calculate_dynamic_strength(instructions, base_strength * strength, step, max_steps)
     
     # FORGE uses UnetPatcher, so we need to update the LoRA application
     if hasattr(unet, 'set_lora_scale'):
@@ -111,8 +117,8 @@ class DynamicLoRAForForge(scripts.Script):
         for prompt in [p.prompt, p.negative_prompt]:
             loras = re.findall(r'<lora:(.*?)>', prompt)
             for lora in loras:
-                base_name, instructions = parse_lora_name(lora)
-                logger.info(f"Parsed LoRA: {base_name}, Instructions: {instructions}")
+                base_name, instructions, base_strength = parse_lora_name(lora)
+                logger.info(f"Parsed LoRA: {base_name}, Instructions: {instructions}, Base strength: {base_strength}")
 
         unet = p.sd_model.forge_objects.unet
         logger.info(f"Original UNet apply_lora method: {unet.apply_lora}")
@@ -123,7 +129,7 @@ class DynamicLoRAForForge(scripts.Script):
             self.wrapped_apply_lora_called = True
             dynamic_strength = dynamic_lora_application(unet, lora_name, strength, self.current_step, self.total_steps)
             
-            base_name, _ = parse_lora_name(lora_name)
+            base_name, _, _ = parse_lora_name(lora_name)
             if base_name not in self.weight_history:
                 self.weight_history[base_name] = []
             self.weight_history[base_name].append((self.current_step, dynamic_strength))
