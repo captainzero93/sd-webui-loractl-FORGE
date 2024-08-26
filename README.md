@@ -1,169 +1,92 @@
-# LoRa Control - Dynamic Weights Controller
+# LoRa Control - Dynamic Weights Controller for FORGE
 
-This is an extension for the [Automatic1111 Stable Diffusion web interface](https://github.com/AUTOMATIC1111/stable-diffusion-webui) which replaces the standard built-in LoraNetwork with one that understands additional syntax for mutating lora weights over the course of the generation. Both positional arguments and named arguments are honored, and additional control for normal versus high-res passes are provided.
+This is an extension for the [FORGE Stable Diffusion web interface](https://github.com/lllyasviel/stable-diffusion-webui-forge) which implements dynamic LoRA weight control during image generation. It allows for specifying keyframe weights for LoRAs at arbitrary points during the generation process.
 
-The idea was inspired by the step control in [composable lora](https://github.com/a2569875/stable-diffusion-webui-composable-lora), which unfortunately doesn't work with newer versions of the webui.
+## Features
 
-Quick features:
+* Easily specify keyframe weights for LoRAs at arbitrary points
+* Extends the existing LoRA syntax; no new systems to learn
+* Provides separate control of LoRA weights over initial and high-res passes
+* Compatible with FORGE's UnetPatcher system
 
-* Easily specify keyframe weights for loras at arbitrary points
-* Extends the existing lora syntax; no new systems to learn.
-* Provides for separate control of lora weights over initial and hires passes.
+## Installation
 
-### Installation
+1. Clone this repository into your FORGE extensions folder:
+   ```
+   git clone https://github.com/yourusername/sd-webui-loractl-FORGE extensions/sd-webui-loractl-FORGE
+   ```
+2. Restart your FORGE instance.
 
-**⚠️ This extension only works with the Automatic1111 1.5RC or later. It is directly tied to the new network handling architecture. It does not currently work with SD.Next, and will not unless SD.Next adopts the 1.5 extra network architecture.**
+## Usage
 
-In the Automatic1111 UI, go to Extensions, then "Install from URL" and enter
+The standard LoRA syntax in FORGE is:
 
-```
-https://github.com/cheald/sd-webui-loractl-FORGE
-```
+    <lora:network_name:strength>
 
-Then go to the "Installed" tab and click "Apply and Restart UI". You don't have to enable it; the extension is "always on". If you don't use the extended syntax, then the behavior is identical to the stock behavior.
+This extension extends the syntax to allow for dynamic weight control:
 
-### Basic Usage
+    <lora:network_name[step1:weight1,step2:weight2,...]:base_strength>
 
-The standard built-in Lora syntax is:
+For example:
 
-    <lora:network_name[:te_multiplier[:unet_multiplier[:dyn_dim]]]>
+    <lora:my_lora[0:0.5,50:1.0,100:0.75]:1.0>
 
-or with named parameters:
+This will start the LoRA at 0.5 strength, increase to full strength at 50% of the generation, and then decrease to 0.75 strength by the end.
 
-    <lora:network_name:te=0:unet=1:dyn=256>
+### Step Specification
 
-This extension extends this syntax so that rather than just single weights, you can provide a list of `weight@step`, delimited by commas or semicolons. The weight will then be interpolated per step appropriately.
+Steps can be specified in two ways:
+1. As a percentage (0-100) of the total steps
+2. As an absolute step number (any number greater than 100)
 
-The weight may be:
+### High-Res Pass Control
 
-* A single number, which will be used for all steps (e.g, `1.0`)
-* A comma-separated list of weight-at-step pairs, e.g. `0@0,1@0.5,0@1` to start at 0, go to 1.0 strength halfway through generation, then scale back down to 0 when we finish generation. This is smoothly interpolated, so the weight curve looks something like:
+You can use the `hr` parameter to specify weights for the high-res pass:
 
-![](assets/tmpumkrx_oc.png)
+    <lora:network[0:0.5,100:1.0]:1.0:hr[0:1.0,100:0.5]>
 
-The step value (after the @) may be a float in the 0.0-1.0 domain, in which case it is interpreted as a percentage of the pass steps. If it is greater than 1, then it is interpreted as an absolute step number.
+This applies the LoRA with increasing strength in the base pass, and decreasing strength in the high-res pass.
 
-If only a single argument (or just `te`) is given, then it applies to both the text encoder and the unet.
+## UI Controls
 
-The default weight for the network at step 0 is the earliest weight given. That is, given a step weight of `0.25@0.5,1@1`, the weights will will begin at 0.25 weight, stay there until until half the steps are run, then interpolate up to 1.0 for the final step.
+In the FORGE UI, you'll find a "Dynamic LoRA Weights" accordion in both txt2img and img2img tabs with the following options:
 
-### Network Aliases
+1. Enable Dynamic LoRA: Activates the dynamic LoRA weight functionality.
+2. Plot LoRA Weights: When enabled, adds a graph of the LoRA weight changes to the output images.
 
-You can also use `loractl` as the network name; this is functionally identical, but may let you dodge compatibility issues with other network handling, and will cause loractl networks to just not do anything when the extension is not enabled.
+## Examples
 
-    <loractl:network:0.5:hr=1.0>
+1. Gradual increase in LoRA strength:
+   ```
+   <lora:my_lora[0:0,100:1.0]:1.0>
+   ```
 
-### Separate high-res pass control
+2. LoRA warmup and cooldown:
+   ```
+   <lora:my_lora[0:0,25:1.0,75:1.0,100:0]:1.0>
+   ```
 
-You can use the named arguments `hr`, `hrte`, and `hrunet` to specify weights for the whole lora, or just the te/unet during the high res pass. For example, you could apply a lora at half weight during the first pass, and full weight during the HR pass, with:
+3. Different weights for base and high-res pass:
+   ```
+   <lora:my_lora[0:0.5,100:1.0]:1.0:hr[0:1.0,100:0.5]>
+   ```
 
-    <lora:network:0.5:hr=1.0>
+## Compatibility Notes
 
-![](assets/tmp6vhmj4ty.png)
+This extension is specifically designed for FORGE and utilizes its UnetPatcher system. It may not be directly compatible with other Stable Diffusion Web UI implementations.
 
-Or, you could grow the lora strength during the first pass, and then decline during the HR pass:
+## Troubleshooting
 
-    <lora:network:0@0,1@1:hr=1@0,0@1>
+If you encounter any issues:
 
-### Lora mixing
+1. Check the FORGE logs for any error messages related to the extension.
+2. Ensure that your FORGE installation is up-to-date.
+3. Verify that the LoRA syntax is correct and follows the format described above.
 
-Sometimes, one lora or another is too powerful. Either it overpowers the base model, or it overpowers other loras in the prompt. For example, I have the [Mechanical Bird](https://civitai.com/models/98218/mechanical-bird) and [Star Wars AT-AT](https://civitai.com/models/97961/star-wars-at-at-1980) loras together in a prompt. I want a sweet birdlike cybernetic AT walker!
+## Contributing
 
-So I first try just throwing them together:
+Contributions are welcome! Please feel free to submit a Pull Request.
 
-```
-<lora:st4rw4ar5at4t:1> <lora:MechanicalBird:1> mechanical bird,  st4rw4ar5at4t
-```
+## License
 
-![](assets/00007-1449410826.png)
-
-The AT lora is clearly too powerful, so I'll try mixing them together more conservatively:
-
-```
-<lora:st4rw4ar5at4t:0.5> <lora:MechanicalBird:0.5> mechanical bird,  st4rw4ar5at4t
-``````
-
-![](assets/00008-1449410826.png)
-
-The bird hardly comes through; the AT-AT lora is clearly far more heavily overtrained.
-
-I can try reducing that AT-AT lora weight to let more of the bird come through:
-
-```
-<lora:st4rw4ar5at4t:0.55> <lora:MechanicalBird:1> mechanical bird,  st4rw4ar5at4t
-```
-![](assets/00012-1449410826.png)
-
-That AT-AT model is just way too strong, and we can't get enough bird to come through. This is where we can use Loractl!
-
-```
-<lora:st4rw4ar5at4t:0@0,1@0.4> <lora:MechanicalBird:1@0,0.5@0.5> mechanical bird,  st4rw4ar5at4t
-```
-
-Here, I'm going to set the AT lora's weight to 0 to start, ramping up to full strength by 40%. The mechanical bird will start at full strength, and will ramp down to 50% strength by 50%.
-
-![](assets/00009-1449410826.png)
-
-That's more like it!
-
-We can see how the lora weights applied over the course of the run:
-
-![](assets/tmpzxoq_cn7.png)
-
-### Lora warmup
-
-Sometimes, a lora has useful elements that we want in an image, but it conflicts with the base model. For an example here, I'm using Realistic Vision 4.0 (which is a hyper-realistic model) and a Pixelart lora (which plays well with anime models, but which fights with realistic models).
-
-I want a picture of an awesome mecha at sunset. First we'll get a baseline with the pixelart lora at 0 strength:
-
-```
-<lora:pixel:0> pixelart, mecha on the beach, beautiful sunset, epic lighting
-```
-
-![](assets/00013-1449410826.png)
-
-Sweet! That looks awesome, but let's pixelify it:
-
-```
-<lora:pixel:1> pixelart, mecha on the beach, beautiful sunset, epic lighting
-```
-
-![](assets/00014-1449410826.png)
-
-The clash between the animated and realistic models is evident here: they fight for inital control of the image, and the result ends up looking like something that you'd have played in the 80s on a Tandy 1000.
-
-So, we're going to just stuff the pixelart lora for the first 5 steps, THEN turn it on. This lets the underlying model determine the overall compositional elements of the image before the lora starts exerting its influence.
-
-```
-<lora:pixel:1:0@5,1@6> pixelart, mecha on the beach, beautiful sunset, epic lighting
-```
-
-![](assets/00015-1449410826.png)
-
-Awesome.
-
-### Separate text encoder/unet control
-
-The new 1.5.0RC allows for separate control of the text encoder and unet weights in the lora syntax. loractl allows for variable control of them independently, as well:
-
-```
-<lora:pixel:te=1:unet=0@0,1@1> pixelart, mecha on the beach, beautiful sunset, epic lighting
-```
-
-![](assets/00016-1449410826.png)
-
-```
-<lora:pixel:te=0@0,1@1:unet=1> pixelart, mecha on the beach, beautiful sunset, epic lighting
-```
-
-![](assets/00017-1449410826.png)
-
-You can play with each of the weights individually to achieve the effects and model mixing best desired.
-
-### Running tests
-
-A basic test suite is included to assert that parsing and setup of weight params is correct. Invoke it with:
-
-    python -m unittest discover test
-
-Please note that the extension will need to be properly installed in a webui install to be tested, as it does rely on imports from the webui itself.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
