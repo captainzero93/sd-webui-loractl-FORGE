@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from modules import scripts, shared
 from modules.processing import StableDiffusionProcessing
-from modules.prompt_parser import parse_prompt_attention
+from modules.extra_networks import parse_prompt
 from typing import Dict, List, Tuple
 import logging
 
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 logger.info("Dynamic LoRA Weights script for Forge is being loaded")
 
-def parse_dynamic_prompt(prompt: str) -> Tuple[str, Dict[str, Dict[int, float]]]:
+def parse_dynamic_prompt(prompt: str) -> Tuple[str, Dict[str, Dict[str, float]]]:
     dynamic_loras = {}
     new_prompt = prompt
 
@@ -34,29 +34,30 @@ def parse_dynamic_prompt(prompt: str) -> Tuple[str, Dict[str, Dict[int, float]]]
     new_prompt = re.sub(r'<lora:([^:>]+):([^>]+)>', replace_lora, new_prompt)
     return new_prompt, dynamic_loras
 
-def parse_dynamic_instructions(instruction_str: str) -> Dict[int, float]:
+def parse_dynamic_instructions(instruction_str: str) -> Dict[str, float]:
     instructions = {}
     for instruction in instruction_str.split(','):
         step, weight = instruction.split(':')
-        instructions[int(step)] = float(weight)
+        instructions[step] = float(weight)
     return instructions
 
-def calculate_dynamic_strength(instructions: Dict[int, float], base_strength: float, current_step: int, total_steps: int) -> float:
+def calculate_dynamic_strength(instructions: Dict[str, float], base_strength: float, current_step: int, total_steps: int) -> float:
     if not instructions:
         return base_strength
 
     normalized_step = current_step / total_steps * 100
-    steps = sorted(instructions.keys())
+    steps = sorted(map(float, instructions.keys()))
 
     if normalized_step <= steps[0]:
-        return instructions[steps[0]] * base_strength
+        return instructions[str(steps[0])] * base_strength
     if normalized_step >= steps[-1]:
-        return instructions[steps[-1]] * base_strength
+        return instructions[str(steps[-1])] * base_strength
 
     for i, step in enumerate(steps):
         if step > normalized_step:
             prev_step, next_step = steps[i-1], step
-            prev_weight, next_weight = instructions[prev_step], instructions[step]
+            prev_weight = instructions[str(prev_step)]
+            next_weight = instructions[str(next_step)]
             break
 
     weight_range = next_weight - prev_weight
@@ -68,7 +69,7 @@ def calculate_dynamic_strength(instructions: Dict[int, float], base_strength: fl
 class DynamicLoRAForForge(scripts.Script):
     def __init__(self):
         super().__init__()
-        self.dynamic_loras: Dict[str, Dict[str, Dict[int, float]]] = {}
+        self.dynamic_loras: Dict[str, Dict[str, Dict[str, float]]] = {}
 
     def title(self):
         return "Dynamic LoRA Weights for Forge"
@@ -94,6 +95,9 @@ class DynamicLoRAForForge(scripts.Script):
         self.dynamic_loras['positive'] = dynamic_loras_positive
         self.dynamic_loras['negative'] = dynamic_loras_negative
 
+        # Store original extra_network_data
+        self.original_extra_network_data = p.extra_network_data
+
         total_steps = p.steps
 
         def dynamic_callback(step: int, x):
@@ -107,23 +111,25 @@ class DynamicLoRAForForge(scripts.Script):
         p.callback_map['dynamic_lora'] = dynamic_callback
 
     def apply_dynamic_weights(self, p: StableDiffusionProcessing, current_step: int, total_steps: int):
-        for prompt_type, loras in self.dynamic_loras.items():
-            for lora_name, lora_info in loras.items():
-                base_strength = lora_info['base']
-                dynamic_instructions = lora_info['dynamic']
-
-                dynamic_strength = calculate_dynamic_strength(
-                    dynamic_instructions,
-                    base_strength,
-                    current_step,
-                    total_steps
-                )
-
-                # Update LoRA weight in Forge's model
-                if hasattr(shared.sd_model, 'set_lora_weight'):
-                    shared.sd_model.set_lora_weight(lora_name, dynamic_strength)
+        new_extra_network_data = {}
+        for network_type, network_params in self.original_extra_network_data.items():
+            new_params = []
+            for param in network_params:
+                if network_type == 'lora' and param.items[0] in self.dynamic_loras['positive']:
+                    lora_name = param.items[0]
+                    lora_info = self.dynamic_loras['positive'][lora_name]
+                    dynamic_strength = calculate_dynamic_strength(
+                        lora_info['dynamic'],
+                        lora_info['base'],
+                        current_step,
+                        total_steps
+                    )
+                    new_params.append(type(param)([lora_name, str(dynamic_strength)]))
                 else:
-                    logger.warning(f"Unable to set LoRA weight for {lora_name}. Method not found.")
+                    new_params.append(param)
+            new_extra_network_data[network_type] = new_params
+        
+        p.extra_network_data = new_extra_network_data
 
     def postprocess(self, p, processed, enabled, plot_weights):
         if not enabled:
@@ -134,11 +140,8 @@ class DynamicLoRAForForge(scripts.Script):
             if plot is not None:
                 processed.images.append(plot)
 
-        # Reset LoRA weights to their original values
-        if hasattr(shared.sd_model, 'set_lora_weight'):
-            for loras in self.dynamic_loras.values():
-                for lora_name, lora_info in loras.items():
-                    shared.sd_model.set_lora_weight(lora_name, lora_info['base'])
+        # Restore original extra_network_data
+        p.extra_network_data = self.original_extra_network_data
 
         self.dynamic_loras.clear()
 
