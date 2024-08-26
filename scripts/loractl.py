@@ -2,8 +2,15 @@ import torch
 import gradio as gr
 import numpy as np
 import matplotlib.pyplot as plt
-from modules import scripts
+from modules import scripts, script_callbacks
 from typing import Dict, List, Tuple
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+logger.info("Dynamic LoRA Weights script is being loaded")
 
 def calculate_dynamic_strength(instructions: Dict[int, float], base_strength: float, current_step: int, max_steps: int) -> float:
     if not instructions:
@@ -48,36 +55,41 @@ def dynamic_lora_application(unet, lora_name: str, strength: float, step: int, m
     base_name, instructions = parse_lora_name(lora_name)
     dynamic_strength = calculate_dynamic_strength(instructions, strength, step, max_steps)
     
-    # Apply the LoRA with the calculated strength
-    # This is a placeholder - you'll need to implement the actual LoRA application
-    # based on how FORGE handles LoRAs
-    unet.apply_lora(base_name, dynamic_strength)
+    # FORGE uses UnetPatcher, so we need to update the LoRA application
+    if hasattr(unet, 'set_lora_scale'):
+        # Assuming UnetPatcher has a method to set LoRA scale
+        unet.set_lora_scale(base_name, dynamic_strength)
+    else:
+        # Fallback method if set_lora_scale is not available
+        for name, module in unet.named_modules():
+            if hasattr(module, 'set_lora_scale'):
+                module.set_lora_scale(base_name, dynamic_strength)
     
     return dynamic_strength
 
 class DynamicLoRAForForge(scripts.Script):
-    sorting_priority = 13  # It will be the 13th item on UI.
-
     def __init__(self):
-        self.weight_history: Dict[str, List[Tuple[int, float]]] = {}
         super().__init__()
+        self.weight_history: Dict[str, List[Tuple[int, float]]] = {}
+        logger.info("DynamicLoRAForForge instance created")
 
     def title(self):
         return "Dynamic LoRA Weights"
 
     def show(self, is_img2img):
+        logger.info(f"show method called with is_img2img={is_img2img}")
         return scripts.AlwaysVisible
 
-    def ui(self, *args, **kwargs):
+    def ui(self, is_img2img):
+        logger.info("ui method called")
         with gr.Accordion(open=False, label=self.title()):
             enabled = gr.Checkbox(label='Enable Dynamic LoRA', value=False)
             plot_weights = gr.Checkbox(label='Plot LoRA Weights', value=False)
 
-        return enabled, plot_weights
+        return [enabled, plot_weights]
 
-    def process_before_every_sampling(self, p, *script_args, **kwargs):
-        enabled, plot_weights = script_args
-
+    def process(self, p, enabled, plot_weights):
+        logger.info(f"process called with enabled={enabled}, plot_weights={plot_weights}")
         if not enabled:
             return
 
@@ -85,11 +97,11 @@ class DynamicLoRAForForge(scripts.Script):
         original_apply_lora = unet.apply_lora
 
         def wrapped_apply_lora(lora_name: str, strength: float):
+            logger.info(f"Applying LoRA: {lora_name} with strength {strength}")
             current_step = p.step
             max_steps = p.steps
             dynamic_strength = dynamic_lora_application(unet, lora_name, strength, current_step, max_steps)
             
-            # Record the weight for plotting
             base_name, _ = parse_lora_name(lora_name)
             if base_name not in self.weight_history:
                 self.weight_history[base_name] = []
@@ -106,16 +118,16 @@ class DynamicLoRAForForge(scripts.Script):
             plot_lora_weights=plot_weights,
         ))
 
-        return
-
-    def postprocess(self, p, processed, *args):
-        enabled, plot_weights = args
-
+    def postprocess(self, p, processed, enabled, plot_weights):
+        logger.info(f"postprocess called with enabled={enabled}, plot_weights={plot_weights}")
         if enabled and plot_weights:
             plot = self.make_plot()
             processed.images.append(plot)
 
-        # Clear the weight history for the next generation
+        # Restore original apply_lora method
+        if hasattr(p.sd_model.forge_objects.unet, 'apply_lora'):
+            del p.sd_model.forge_objects.unet.apply_lora
+
         self.weight_history.clear()
 
     def make_plot(self):
@@ -138,3 +150,6 @@ class DynamicLoRAForForge(scripts.Script):
         plt.close()
 
         return plot_image
+
+# Remove the unsupported callback
+logger.info("Registering DynamicLoRAForForge script")
