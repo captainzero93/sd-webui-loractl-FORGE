@@ -2,7 +2,7 @@ import torch
 import gradio as gr
 import numpy as np
 import matplotlib.pyplot as plt
-from modules import scripts, script_callbacks
+from modules import scripts, script_callbacks, extra_networks
 from typing import Dict, List, Tuple
 import logging
 import re
@@ -40,52 +40,20 @@ def calculate_dynamic_strength(instructions: Dict[int, float], base_strength: fl
     logger.debug(f"Calculated dynamic strength: {interpolated_weight * base_strength} for step {current_step}/{max_steps}")
     return interpolated_weight * base_strength
 
-def parse_lora_name(lora_name: str) -> Tuple[str, Dict[int, float], float]:
-    parts = lora_name.split(':')
-    base_name = parts[0]
+def parse_dynamic_instructions(instruction_str: str) -> Dict[int, float]:
     instructions = {}
-    base_strength = 1.0
-
-    if len(parts) > 1:
-        if '[' in parts[1]:
-            instruction_part = parts[1].strip('[]')
-            for instruction in instruction_part.split(','):
-                step, weight = instruction.split(':')
-                instructions[int(step)] = float(weight)
-            if len(parts) > 2:
-                base_strength = float(parts[2])
-        else:
-            base_strength = float(parts[1])
-
-    logger.debug(f"Parsed LoRA name: {base_name}, Instructions: {instructions}, Base strength: {base_strength}")
-    return base_name.strip(), instructions, base_strength
-
-def dynamic_lora_application(unet, lora_name: str, strength: float, step: int, max_steps: int):
-    base_name, instructions, base_strength = parse_lora_name(lora_name)
-    dynamic_strength = calculate_dynamic_strength(instructions, base_strength * strength, step, max_steps)
-    
-    # FORGE uses UnetPatcher, so we need to update the LoRA application
-    if hasattr(unet, 'set_lora_scale'):
-        # Assuming UnetPatcher has a method to set LoRA scale
-        unet.set_lora_scale(base_name, dynamic_strength)
-        logger.info(f"Applied LoRA {base_name} with dynamic strength {dynamic_strength} at step {step}/{max_steps}")
-    else:
-        # Fallback method if set_lora_scale is not available
-        for name, module in unet.named_modules():
-            if hasattr(module, 'set_lora_scale'):
-                module.set_lora_scale(base_name, dynamic_strength)
-                logger.info(f"Applied LoRA {base_name} to module {name} with dynamic strength {dynamic_strength} at step {step}/{max_steps}")
-    
-    return dynamic_strength
+    for instruction in instruction_str.split(','):
+        step, weight = instruction.split(':')
+        instructions[int(step)] = float(weight)
+    return instructions
 
 class DynamicLoRAForForge(scripts.Script):
     def __init__(self):
         super().__init__()
         self.weight_history: Dict[str, List[Tuple[int, float]]] = {}
-        self.original_apply_lora = None
+        self.dynamic_loras: Dict[str, Dict[int, float]] = {}
         self.current_step = 0
         self.total_steps = 0
-        self.wrapped_apply_lora_called = False
         logger.info("DynamicLoRAForForge instance created")
 
     def title(self):
@@ -109,69 +77,60 @@ class DynamicLoRAForForge(scripts.Script):
             return
 
         self.weight_history.clear()
+        self.dynamic_loras.clear()
         self.current_step = 0
         self.total_steps = p.steps
-        self.wrapped_apply_lora_called = False
 
-        # Log the parsed LoRA instructions
+        # Preprocess LoRA instructions
         for prompt in [p.prompt, p.negative_prompt]:
             loras = re.findall(r'<lora:(.*?)>', prompt)
             for lora in loras:
-                base_name, instructions, base_strength = parse_lora_name(lora)
-                logger.info(f"Parsed LoRA: {base_name}, Instructions: {instructions}, Base strength: {base_strength}")
-
-        unet = p.sd_model.forge_objects.unet
-        logger.info(f"Original UNet apply_lora method: {unet.apply_lora}")
-        self.original_apply_lora = unet.apply_lora
-
-        def wrapped_apply_lora(lora_name: str, strength: float):
-            logger.info(f"wrapped_apply_lora called with lora_name={lora_name}, strength={strength}")
-            self.wrapped_apply_lora_called = True
-            dynamic_strength = dynamic_lora_application(unet, lora_name, strength, self.current_step, self.total_steps)
+                parts = lora.split(':')
+                if len(parts) > 1 and '[' in parts[1]:
+                    base_name = parts[0]
+                    instruction_part = parts[1].strip('[]')
+                    instructions = parse_dynamic_instructions(instruction_part)
+                    self.dynamic_loras[base_name] = instructions
+                    # Replace dynamic instructions with a placeholder
+                    new_lora = f"{base_name}:1.0"
+                    prompt = prompt.replace(f"<lora:{lora}>", f"<lora:{new_lora}>")
             
-            base_name, _, _ = parse_lora_name(lora_name)
-            if base_name not in self.weight_history:
-                self.weight_history[base_name] = []
-            self.weight_history[base_name].append((self.current_step, dynamic_strength))
-            logger.info(f"Step {self.current_step}: Added weight {dynamic_strength} for LoRA {base_name}")
+        p.prompt = prompt
+        p.negative_prompt = prompt
+
+        # Monkey patch extra_networks_lora.activate
+        original_activate = extra_networks.extra_networks_dict['lora'].activate
+        def wrapped_activate(self, p, params):
+            lora_name = params.positional[0]
+            if lora_name in self.dynamic_loras:
+                # Apply dynamic strength
+                dynamic_strength = calculate_dynamic_strength(
+                    self.dynamic_loras[lora_name],
+                    float(params.positional[1]) if len(params.positional) > 1 else 1.0,
+                    self.current_step,
+                    self.total_steps
+                )
+                params.positional[1] = str(dynamic_strength)
+                
+                if lora_name not in self.weight_history:
+                    self.weight_history[lora_name] = []
+                self.weight_history[lora_name].append((self.current_step, dynamic_strength))
             
-            return self.original_apply_lora(lora_name, dynamic_strength)
+            return original_activate(p, params)
 
-        unet.apply_lora = wrapped_apply_lora
-        logger.info(f"Wrapped UNet apply_lora method: {unet.apply_lora}")
+        extra_networks.extra_networks_dict['lora'].activate = wrapped_activate
 
-        # Monkey patch the UNet forward method to track steps
-        original_forward = unet.forward
-
-        def forward_with_step_tracking(*args, **kwargs):
-            self.current_step += 1
-            logger.info(f"UNet forward called. Current step: {self.current_step}")
-            return original_forward(*args, **kwargs)
-
-        unet.forward = forward_with_step_tracking
-        logger.info(f"Wrapped UNet forward method: {unet.forward}")
-
-        # Fallback step tracking
-        original_sampler_callback = p.callback
-
+        # Monkey patch the sampler to track steps
+        original_callback = p.callback
         def sampler_callback(step, *args, **kwargs):
             self.current_step = step
-            logger.info(f"Sampler callback. Current step: {self.current_step}")
-            if original_sampler_callback:
-                original_sampler_callback(step, *args, **kwargs)
+            if original_callback:
+                original_callback(step, *args, **kwargs)
 
         p.callback = sampler_callback
 
-        p.sd_model.forge_objects.unet = unet
-
-        p.extra_generation_params.update(dict(
-            dynamic_lora_enabled=enabled,
-            plot_lora_weights=plot_weights,
-        ))
-
     def postprocess(self, p, processed, enabled, plot_weights):
         logger.info(f"postprocess called with enabled={enabled}, plot_weights={plot_weights}")
-        logger.info(f"wrapped_apply_lora was called: {self.wrapped_apply_lora_called}")
         logger.info(f"Final current_step: {self.current_step}")
         logger.info(f"Final weight history: {self.weight_history}")
 
@@ -183,15 +142,11 @@ class DynamicLoRAForForge(scripts.Script):
                 logger.warning("Plot was None, not appending to processed images")
 
         # Restore original methods
-        if self.original_apply_lora is not None:
-            p.sd_model.forge_objects.unet.apply_lora = self.original_apply_lora
-            logger.info("Restored original apply_lora method")
-
-        if hasattr(p.sd_model.forge_objects.unet, 'forward'):
-            del p.sd_model.forge_objects.unet.forward
-            logger.info("Removed step tracking from UNet forward method")
+        extra_networks.extra_networks_dict['lora'].activate = original_activate
+        logger.info("Restored original lora activate method")
 
         self.weight_history.clear()
+        self.dynamic_loras.clear()
 
     def make_plot(self):
         logger.info(f"make_plot called. Weight history: {self.weight_history}")
