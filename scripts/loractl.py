@@ -2,9 +2,7 @@ import torch
 import gradio as gr
 import numpy as np
 import matplotlib.pyplot as plt
-from modules import scripts, script_callbacks
-from modules.processing import StableDiffusionProcessing
-from modules.forge_util import forge_enable_lazy_loading
+from modules import scripts, script_callbacks, extra_networks
 from typing import Dict, List, Tuple
 import logging
 import re
@@ -13,7 +11,7 @@ import re
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-logger.info("Dynamic LoRA Weights script for FORGE is being loaded")
+logger.info("Dynamic LoRA Weights script is being loaded")
 
 def calculate_dynamic_strength(instructions: Dict[int, float], base_strength: float, current_step: int, max_steps: int) -> float:
     if not instructions:
@@ -56,10 +54,11 @@ class DynamicLoRAForForge(scripts.Script):
         self.dynamic_loras: Dict[str, Dict[int, float]] = {}
         self.current_step = 0
         self.total_steps = 0
+        self.original_activate = None
         logger.info("DynamicLoRAForForge instance created")
 
     def title(self):
-        return "Dynamic LoRA Weights for FORGE"
+        return "Dynamic LoRA Weights"
 
     def show(self, is_img2img):
         logger.info(f"show method called with is_img2img={is_img2img}")
@@ -73,7 +72,7 @@ class DynamicLoRAForForge(scripts.Script):
 
         return [enabled, plot_weights]
 
-    def process(self, p: StableDiffusionProcessing, enabled, plot_weights):
+    def process(self, p, enabled, plot_weights):
         logger.info(f"process called with enabled={enabled}, plot_weights={plot_weights}")
         if not enabled:
             return
@@ -100,37 +99,42 @@ class DynamicLoRAForForge(scripts.Script):
         p.prompt = prompt
         p.negative_prompt = prompt
 
-        # Monkey patch the sampler to track steps and apply dynamic weights
+        # Store the original activate method
+        if hasattr(extra_networks, 'extra_networks_lora'):
+            self.original_activate = extra_networks.extra_networks_lora.activate
+        else:
+            logger.warning("extra_networks_lora not found in extra_networks module")
+            return
+
+        # Monkey patch extra_networks_lora.activate
+        def wrapped_activate(self_lora, p, params):
+            lora_name = params.positional[0]
+            if lora_name in self.dynamic_loras:
+                # Apply dynamic strength
+                dynamic_strength = calculate_dynamic_strength(
+                    self.dynamic_loras[lora_name],
+                    float(params.positional[1]) if len(params.positional) > 1 else 1.0,
+                    self.current_step,
+                    self.total_steps
+                )
+                params.positional[1] = str(dynamic_strength)
+
+                if lora_name not in self.weight_history:
+                    self.weight_history[lora_name] = []
+                self.weight_history[lora_name].append((self.current_step, dynamic_strength))
+
+            return self.original_activate(p, params)
+
+        extra_networks.extra_networks_lora.activate = wrapped_activate
+
+        # Monkey patch the sampler to track steps
         original_callback = p.callback
         def sampler_callback(step, *args, **kwargs):
             self.current_step = step
-            self.apply_dynamic_weights(p)
             if original_callback:
                 original_callback(step, *args, **kwargs)
 
         p.callback = sampler_callback
-
-    def apply_dynamic_weights(self, p: StableDiffusionProcessing):
-        for lora_name, instructions in self.dynamic_loras.items():
-            dynamic_strength = calculate_dynamic_strength(
-                instructions,
-                1.0,  # base strength
-                self.current_step,
-                self.total_steps
-            )
-            
-            # Update LoRA weight in the FORGE processing object
-            for lora in p.loras:
-                if lora.name == lora_name:
-                    lora.strength = dynamic_strength
-                    break
-
-            if lora_name not in self.weight_history:
-                self.weight_history[lora_name] = []
-            self.weight_history[lora_name].append((self.current_step, dynamic_strength))
-
-        # Ensure FORGE updates the model with new LoRA weights
-        forge_enable_lazy_loading.update_model_loras(p.sd_model, p.loras)
 
     def postprocess(self, p, processed, enabled, plot_weights):
         logger.info(f"postprocess called with enabled={enabled}, plot_weights={plot_weights}")
@@ -143,6 +147,13 @@ class DynamicLoRAForForge(scripts.Script):
                 processed.images.append(plot)
             else:
                 logger.warning("Plot was None, not appending to processed images")
+
+        # Restore original methods
+        if self.original_activate is not None:
+            extra_networks.extra_networks_lora.activate = self.original_activate
+            logger.info("Restored original lora activate method")
+        else:
+            logger.warning("Original activate method was not stored, unable to restore")
 
         self.weight_history.clear()
         self.dynamic_loras.clear()
