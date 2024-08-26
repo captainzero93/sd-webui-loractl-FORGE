@@ -13,7 +13,7 @@ This is an extension for the [FORGE Stable Diffusion web interface](https://gith
 
 1. Clone this repository into your FORGE extensions folder:
    ```
-   git clone https://github.com/yourusername/sd-webui-loractl-FORGE extensions/sd-webui-loractl-FORGE
+   git clone https://github.com/watercat93/sd-webui-loractl-FORGE
    ```
 2. Restart your FORGE instance.
 
